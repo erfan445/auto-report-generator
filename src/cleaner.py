@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 import re
+import warnings
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
@@ -14,7 +15,7 @@ class CleaningError(ValueError):
 @dataclass(frozen=True)
 class CleaningConfig:
     # Policies
-    invalid_date_policy: str = "drop"      # "drop" | "keep"
+    invalid_date_policy: str = "keep"  # "drop" | "keep"
     invalid_amount_policy: str = "keep_nan" # "drop" | "zero" | "keep_nan"
 
     # Defaults for missing text fields
@@ -62,44 +63,6 @@ _SYNONYMS: Dict[str, str] = {
     "date": "order_date",
     "created_at": "order_date",
     "createdat": "order_date",
-    "order_date_": "order_date",
-    "orderdate_": "order_date",
-    "order_date__": "order_date",
-    "order_date__ ": "order_date",
-    "order_date__": "order_date",
-    "order_date__": "order_date",
-    "order_date__": "order_date",
-    "order_date__": "order_date",
-    "order_date__": "order_date",
-    "order_date__": "order_date",
-    "order_date__": "order_date",
-    "order_date__": "order_date",
-    "order_date__": "order_date",
-    "order_date__": "order_date",
-    "order_date__": "order_date",
-    "order_date__": "order_date",
-    "order_date__": "order_date",
-    "order_date__": "order_date",
-    "order_date__": "order_date",
-    "order_date__": "order_date",
-    "order_date__": "order_date",
-    "order_date__": "order_date",
-    "order_date__": "order_date",
-    "order_date__": "order_date",
-    "order_date__": "order_date",
-    # common variants used in our sample
-    "order_date": "order_date",
-    "order_date__": "order_date",
-    "order_date_": "order_date",
-    "order_date__ ": "order_date",
-    "order_date__  ": "order_date",
-    "order_date___": "order_date",
-    "order_date___ ": "order_date",
-    "order_date___  ": "order_date",
-    "order_date____": "order_date",
-    "order date": "order_date",
-    "orderdate": "order_date",
-    "order_date": "order_date",
 
     # customer_name
     "customer_name": "customer_name",
@@ -137,6 +100,7 @@ _SYNONYMS: Dict[str, str] = {
 }
 
 
+
 def _normalize_col(name: Any) -> str:
     s = str(name).strip().lower()
     # Replace non-alphanumeric with underscore
@@ -157,18 +121,25 @@ def _coalesce_columns(df: pd.DataFrame, cols: List[str]) -> pd.Series:
 
 def _parse_dates(series: pd.Series) -> pd.Series:
     """
-    Robust-ish date parsing for messy formats.
+    Robust date parsing for messy formats.
     Strategy:
-      1) parse with dayfirst=False
-      2) re-parse remaining NaT with dayfirst=True
+      - Try parse normally (dayfirst=False)
+      - For remaining NaT, try dayfirst=True (warning-suppressed)
     """
-    s = series.copy()
-    parsed_1 = pd.to_datetime(s, errors="coerce", dayfirst=False)
-    missing_mask = parsed_1.isna()
+    s = series.copy().astype("string").str.strip()
+    s = s.replace({"": pd.NA, "none": pd.NA, "nan": pd.NA})
+
+    parsed = pd.to_datetime(s, errors="coerce", dayfirst=False)
+
+    missing_mask = parsed.isna() & s.notna()
     if missing_mask.any():
-        parsed_2 = pd.to_datetime(s[missing_mask], errors="coerce", dayfirst=True)
-        parsed_1.loc[missing_mask] = parsed_2
-    return parsed_1
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            parsed2 = pd.to_datetime(s[missing_mask], errors="coerce", dayfirst=True)
+        parsed.loc[missing_mask] = parsed2
+
+    return parsed
+
 
 
 _BAD_AMOUNT_TOKENS = {"", "n/a", "na", "none", "nan", "—", "-", "free"}
@@ -315,10 +286,18 @@ def clean_sales_dataframe(df_raw: pd.DataFrame, cfg: CleaningConfig = CleaningCo
             out[c] = df[c]
 
     # Clean dates
+      
     out["order_date"] = _parse_dates(out["order_date"])
     invalid_dates = int(out["order_date"].isna().sum())
+
+    if invalid_dates > 0 and cfg.invalid_date_policy == "keep":
+        warnings.append(
+            f"{invalid_dates} rows have invalid order_date; date-based charts/KPIs will ignore them."
+        )
+
     if invalid_dates > 0 and cfg.invalid_date_policy == "drop":
         out = out.dropna(subset=["order_date"])
+
 
     # Clean amounts
     parsed_amount = out["amount"].apply(_parse_amount_value)
